@@ -2,13 +2,18 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
 	"image/png"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/pierrec/lz4/v4"
+
 	"ra2fnt/src/internal/fnt"
+	"ra2fnt/src/internal/fontout"
 )
 
 func TestEnsureExportOutDirNotExists(t *testing.T) {
@@ -220,6 +225,62 @@ func TestRunValidateAcceptsNoDedupFlag(t *testing.T) {
 	}
 }
 
+func TestRunCreateCnCNetSpriteFont(t *testing.T) {
+	root := t.TempDir()
+	inPath := filepath.Join(root, "in.fnt")
+	outDir := filepath.Join(root, "out")
+	outPath := filepath.Join(root, "font.xnb")
+	if err := writeSampleFont(inPath); err != nil {
+		t.Fatalf("write sample font: %v", err)
+	}
+
+	if err := runExport([]string{"-in", inPath, "-out", outDir}); err != nil {
+		t.Fatalf("runExport: %v", err)
+	}
+	if err := runCreate([]string{"-in", outDir, "-out", outPath, "-format", fontout.FormatCnCNetSpriteFont}); err != nil {
+		t.Fatalf("runCreate cncnet-spritefont: %v", err)
+	}
+
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read created xnb: %v", err)
+	}
+	if got, want := string(raw[:3]), "XNB"; got != want {
+		t.Fatalf("xnb magic mismatch: got=%q want=%q", got, want)
+	}
+	if got, want := raw[3], byte('w'); got != want {
+		t.Fatalf("xnb platform mismatch: got=%q want=%q", got, want)
+	}
+	if got, want := raw[4], byte(5); got != want {
+		t.Fatalf("xnb version mismatch: got=%d want=%d", got, want)
+	}
+	if got, want := raw[5], byte(0x40); got != want {
+		t.Fatalf("xnb flags mismatch: got=%d want=%d", got, want)
+	}
+	if got, want := int(binary.LittleEndian.Uint32(raw[10:14])), len(decompressLZ4Block(t, raw[14:], int(binary.LittleEndian.Uint32(raw[10:14])))); got != want {
+		t.Fatalf("xnb decompressed size mismatch: got=%d want=%d", got, want)
+	}
+}
+
+func TestRunCreateRejectsUnsupportedFormat(t *testing.T) {
+	root := t.TempDir()
+	inPath := filepath.Join(root, "in.fnt")
+	outDir := filepath.Join(root, "out")
+	outPath := filepath.Join(root, "font.bin")
+	if err := writeSampleFont(inPath); err != nil {
+		t.Fatalf("write sample font: %v", err)
+	}
+
+	if err := runExport([]string{"-in", inPath, "-out", outDir}); err != nil {
+		t.Fatalf("runExport: %v", err)
+	}
+
+	err := runCreate([]string{"-in", outDir, "-out", outPath, "-format", "unknown"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported create format") {
+		t.Fatalf("expected unsupported format error, got: %v", err)
+	}
+}
+
 func writeSampleFont(path string) error {
 	font := &fnt.Font{
 		IdeographWidth: 8,
@@ -246,4 +307,48 @@ func TestVersionString(t *testing.T) {
 	if got, want := versionString(), "ra2fnt version 1.2.3"; got != want {
 		t.Fatalf("version string mismatch: got=%q want=%q", got, want)
 	}
+}
+
+func TestProgressBarFinishIsIdempotent(t *testing.T) {
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer readPipe.Close()
+
+	oldStderr := os.Stderr
+	os.Stderr = writePipe
+	defer func() {
+		os.Stderr = oldStderr
+	}()
+
+	bar := newProgressBar("create")
+	bar.printed = true
+	bar.Finish()
+	bar.Finish()
+
+	if err := writePipe.Close(); err != nil {
+		t.Fatalf("close write pipe: %v", err)
+	}
+
+	output, err := io.ReadAll(readPipe)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if got, want := string(output), "\n"; got != want {
+		t.Fatalf("unexpected finish output: got=%q want=%q", got, want)
+	}
+}
+
+func decompressLZ4Block(t *testing.T, src []byte, size int) []byte {
+	t.Helper()
+	dst := make([]byte, size)
+	n, err := lz4.UncompressBlock(src, dst)
+	if err != nil {
+		t.Fatalf("lz4.UncompressBlock: %v", err)
+	}
+	if got, want := n, size; got != want {
+		t.Fatalf("decompressed size mismatch: got=%d want=%d", got, want)
+	}
+	return dst
 }

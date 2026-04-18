@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"ra2fnt/src/internal/fnt"
+	"ra2fnt/src/internal/fontout"
 	"ra2fnt/src/internal/pngset"
 )
 
@@ -75,6 +76,7 @@ func (bar *progressBar) Update(stage string, done, total int) {
 func (bar *progressBar) Finish() {
 	if bar.printed {
 		fmt.Fprintln(os.Stderr)
+		bar.printed = false
 	}
 }
 
@@ -168,6 +170,7 @@ func runExport(args []string) error {
 	}); err != nil {
 		return err
 	}
+	progress.Finish()
 
 	mappedCodepoints := 0
 	for _, symbolIndex := range font.UnicodeTable {
@@ -176,8 +179,9 @@ func runExport(args []string) error {
 		}
 	}
 
-	fmt.Printf(
-		" exported %d codepoints to %s (source symbols: %d)\n",
+	fmt.Fprintf(
+		os.Stderr,
+		"exported %d codepoints to %s (source symbols: %d)\n",
 		mappedCodepoints,
 		*outDir,
 		font.SymbolsCount,
@@ -224,7 +228,8 @@ func ensureExportOutDir(outDir string, input io.Reader, output io.Writer, force 
 func runCreate(args []string) error {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	inDir := fs.String("in", "", "input directory created by export")
-	outPath := fs.String("out", "", "output .fnt file")
+	outPath := fs.String("out", "", "output font file")
+	format := fs.String("format", fontout.FormatFNT, "create output format: fnt, cncnet-spritefont")
 	noDedup := fs.Bool("no-dedup", false, "disable glyph deduplication")
 	fs.SetOutput(os.Stderr)
 
@@ -234,6 +239,10 @@ func runCreate(args []string) error {
 	if *inDir == "" || *outPath == "" {
 		fs.Usage()
 		return fmt.Errorf("-in and -out are required")
+	}
+	outputFormat, err := fontout.NormalizeFormat(*format)
+	if err != nil {
+		return err
 	}
 
 	options := pngset.ImportOptions{}
@@ -247,15 +256,18 @@ func runCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := fnt.WriteFile(*outPath, font); err != nil {
+	if err := fontout.WriteFile(*outPath, font, outputFormat); err != nil {
 		return err
 	}
+	progress.Finish()
 
-	fmt.Printf(
-		"created %d symbols from %d codepoints in %s (deduplicated: %d)\n",
+	fmt.Fprintf(
+		os.Stderr,
+		"created %d symbols from %d codepoints in %s (%s, deduplicated: %d)\n",
 		report.UniqueSymbols,
 		report.Codepoints,
 		*outPath,
+		outputFormat,
 		report.DeduplicatedSymbols,
 	)
 	return nil
@@ -282,7 +294,8 @@ func runValidate(args []string) error {
 		return err
 	}
 
-	fmt.Printf(
+	fmt.Fprintf(
+		os.Stderr,
 		"validation passed: codepoints=%d, png=%d, zero_width=%d, symbols=%d, deduplicated=%d\n",
 		report.Codepoints,
 		report.PNGFiles,
@@ -296,7 +309,7 @@ func runValidate(args []string) error {
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage:\n")
 	fmt.Fprintf(os.Stderr, "  %s export -in game.fnt -out out_dir [--scale N] [--force]\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "  %s create -in out_dir -out rebuilt.fnt\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s create -in out_dir -out output_file [--format fnt|cncnet-spritefont]\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s validate -in out_dir\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s version\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s --version\n", os.Args[0])

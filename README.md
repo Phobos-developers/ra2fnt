@@ -53,6 +53,12 @@ Create `.fnt` from PNG set:
 ./ra2fnt create -in out_font -out rebuilt.fnt
 ```
 
+Create an experimental LZ4-compressed `SpriteFont XNB v5` font file for [`xna-cncnet-client`](https://github.com/CnCNet/xna-cncnet-client) from PNG set:
+
+```bash
+./ra2fnt create -in out_font -out SpriteFont.xnb --format cncnet-spritefont
+```
+
 Create without glyph deduplication:
 
 ```bash
@@ -107,7 +113,7 @@ Zero-width glyphs are listed only in `metadata.json` (`symbol_width`).
 
 ## Create behavior
 
-`create` reconstructs a `.fnt` from PNG files in the input directory:
+`create` reconstructs a font file from PNG files in the input directory:
 
 - PNG files are discovered recursively (subdirectory names are ignored by parser).
 - Files must be named as fixed-length hex codepoints (for example `0x0041.png`, `0x30A1.png`).
@@ -120,6 +126,9 @@ Zero-width glyphs are listed only in `metadata.json` (`symbol_width`).
 - `ideograph_width` is taken from `metadata.json`.
 - `scale` is taken from `metadata.json`; when `scale > 1`, PNG dimensions are downscaled by this factor during `create` (back to normal font size).
 - Identical glyphs are deduplicated, so multiple codepoints can reference the same symbol index.
+- Output format is selected by `--format`:
+  - `fnt` (default): writes Westwood Unicode BitFont `.fnt`
+  - `cncnet-spritefont`: writes an experimental LZ4-compressed `SpriteFont XNB v5` `.xnb` font file for [`xna-cncnet-client`](https://github.com/CnCNet/xna-cncnet-client)
 - Use `--no-dedup` to disable deduplication.
 - Unicode table is rebuilt from filenames (`0xXXXX` -> symbol index in sorted codepoint order).
 
@@ -141,3 +150,11 @@ Because unicode mapping order/tail bytes are rebuilt, the resulting `.fnt` is no
 - At least one non-zero-width PNG is required to infer `symbol_height`.
 - Zero-width glyphs are represented only in `metadata.json` and have no PNG files.
 - Unicode table order is rebuilt from sorted codepoints.
+- `cncnet-spritefont` always writes LZ4-compressed `SpriteFont XNB v5`.
+- `cncnet-spritefont` is an experimental feature.
+- When `?` is present, `cncnet-spritefont` writes it as `defaultChar` fallback.
+
+## License
+
+- Project license: `MIT` (see `LICENSE`)
+- Third-party notices: `THIRD_PARTY_NOTICES.md`

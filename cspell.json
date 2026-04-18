@@ -3,5 +3,8 @@
   "language": "en",
   "allowCompoundWords": true,
   "useGitignore": true,
-  "words": []
+  "words": [
+    "cncnet",
+    "dedup"
+  ]
 }
