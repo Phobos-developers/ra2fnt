@@ -2,17 +2,26 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"ra2fnt/src/internal/cncnetspritefont"
 	"ra2fnt/src/internal/fnt"
+	"ra2fnt/src/internal/fontout"
 	"ra2fnt/src/internal/pngset"
 )
 
 const progressBarWidth = 30
+const experimentalCnCNetSpriteFontWarning = "warning: cncnet-spritefont is experimental"
+const (
+	ansiYellow = "\033[33m"
+	ansiRed    = "\033[31m"
+	ansiReset  = "\033[0m"
+)
 
 var version = "dev"
 
@@ -75,6 +84,7 @@ func (bar *progressBar) Update(stage string, done, total int) {
 func (bar *progressBar) Finish() {
 	if bar.printed {
 		fmt.Fprintln(os.Stderr)
+		bar.printed = false
 	}
 }
 
@@ -89,6 +99,34 @@ func progressStageLabel(stage string) string {
 	default:
 		return stage
 	}
+}
+
+var stderrSupportsANSI = detectStderrANSI
+
+func detectStderrANSI() bool {
+	info, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+func colorizeWarning(text string) string {
+	if !stderrSupportsANSI() {
+		return text
+	}
+	return ansiYellow + text + ansiReset
+}
+
+func colorizeError(text string) string {
+	if !stderrSupportsANSI() {
+		return text
+	}
+	return ansiRed + text + ansiReset
+}
+
+func experimentalFormatLabel(format string) string {
+	return fmt.Sprintf("%s (%s)", format, colorizeWarning("experimental"))
 }
 
 func main() {
@@ -122,14 +160,14 @@ func main() {
 	}
 
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintln(os.Stderr, colorizeError("error:"), err)
 		os.Exit(1)
 	}
 }
 
 func runExport(args []string) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
-	inPath := fs.String("in", "", "input .fnt file")
+	inPath := fs.String("in", "", "input .fnt or cncnet-spritefont .xnb file")
 	outDir := fs.String("out", "", "output directory for png set")
 	scale := fs.Int("scale", 1, "integer export scale (>=1)")
 	force := fs.Bool("force", false, "delete existing output directory without confirmation")
@@ -155,7 +193,7 @@ func runExport(args []string) error {
 		return nil
 	}
 
-	font, err := fnt.ReadFile(*inPath)
+	font, err := readFontForExport(*inPath)
 	if err != nil {
 		return err
 	}
@@ -168,6 +206,7 @@ func runExport(args []string) error {
 	}); err != nil {
 		return err
 	}
+	progress.Finish()
 
 	mappedCodepoints := 0
 	for _, symbolIndex := range font.UnicodeTable {
@@ -176,13 +215,38 @@ func runExport(args []string) error {
 		}
 	}
 
-	fmt.Printf(
-		" exported %d codepoints to %s (source symbols: %d)\n",
+	fmt.Fprintf(
+		os.Stderr,
+		"exported %d codepoints to %s (source symbols: %d)\n",
 		mappedCodepoints,
 		*outDir,
 		font.SymbolsCount,
 	)
 	return nil
+}
+
+func readFontForExport(path string) (*fnt.Font, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %q: %w", path, err)
+	}
+
+	switch {
+	case len(data) >= 4 && bytes.Equal(data[:4], []byte("fonT")):
+		font, err := fnt.Parse(data)
+		if err != nil {
+			return nil, fmt.Errorf("parse %q as .fnt: %w", path, err)
+		}
+		return font, nil
+	case len(data) >= 3 && bytes.Equal(data[:3], []byte("XNB")):
+		font, err := cncnetspritefont.Parse(data)
+		if err != nil {
+			return nil, fmt.Errorf("parse %q as cncnet-spritefont: %w", path, err)
+		}
+		return font, nil
+	default:
+		return nil, fmt.Errorf("unsupported input format for %q", path)
+	}
 }
 
 func ensureExportOutDir(outDir string, input io.Reader, output io.Writer, force bool) (bool, error) {
@@ -224,7 +288,8 @@ func ensureExportOutDir(outDir string, input io.Reader, output io.Writer, force 
 func runCreate(args []string) error {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	inDir := fs.String("in", "", "input directory created by export")
-	outPath := fs.String("out", "", "output .fnt file")
+	outPath := fs.String("out", "", "output font file")
+	format := fs.String("format", fontout.FormatFNT, "create output format: fnt, "+experimentalFormatLabel(fontout.FormatCnCNetSpriteFont))
 	noDedup := fs.Bool("no-dedup", false, "disable glyph deduplication")
 	fs.SetOutput(os.Stderr)
 
@@ -234,6 +299,13 @@ func runCreate(args []string) error {
 	if *inDir == "" || *outPath == "" {
 		fs.Usage()
 		return fmt.Errorf("-in and -out are required")
+	}
+	outputFormat, err := fontout.NormalizeFormat(*format)
+	if err != nil {
+		return err
+	}
+	if outputFormat == fontout.FormatCnCNetSpriteFont {
+		fmt.Fprintf(os.Stderr, "%s\n", colorizeWarning(experimentalCnCNetSpriteFontWarning))
 	}
 
 	options := pngset.ImportOptions{}
@@ -247,15 +319,18 @@ func runCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := fnt.WriteFile(*outPath, font); err != nil {
+	if err := fontout.WriteFile(*outPath, font, outputFormat); err != nil {
 		return err
 	}
+	progress.Finish()
 
-	fmt.Printf(
-		"created %d symbols from %d codepoints in %s (deduplicated: %d)\n",
+	fmt.Fprintf(
+		os.Stderr,
+		"created %d symbols from %d codepoints in %s (%s, deduplicated: %d)\n",
 		report.UniqueSymbols,
 		report.Codepoints,
 		*outPath,
+		outputFormat,
 		report.DeduplicatedSymbols,
 	)
 	return nil
@@ -282,7 +357,8 @@ func runValidate(args []string) error {
 		return err
 	}
 
-	fmt.Printf(
+	fmt.Fprintf(
+		os.Stderr,
 		"validation passed: codepoints=%d, png=%d, zero_width=%d, symbols=%d, deduplicated=%d\n",
 		report.Codepoints,
 		report.PNGFiles,
@@ -295,8 +371,9 @@ func runValidate(args []string) error {
 
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage:\n")
-	fmt.Fprintf(os.Stderr, "  %s export -in game.fnt -out out_dir [--scale N] [--force]\n", os.Args[0])
-	fmt.Fprintf(os.Stderr, "  %s create -in out_dir -out rebuilt.fnt\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s export -in input_font -out out_dir [--scale N] [--force]\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s create -in out_dir -out output_file [--format fnt|cncnet-spritefont]\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "    %s\n", colorizeWarning("cncnet-spritefont is experimental"))
 	fmt.Fprintf(os.Stderr, "  %s validate -in out_dir\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s version\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s --version\n", os.Args[0])

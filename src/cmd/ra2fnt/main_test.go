@@ -2,13 +2,21 @@ package main
 
 import (
 	"bytes"
+	"encoding/binary"
+	"flag"
 	"image/png"
+	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
+	"github.com/pierrec/lz4/v4"
+
 	"ra2fnt/src/internal/fnt"
+	"ra2fnt/src/internal/fontout"
 )
 
 func TestEnsureExportOutDirNotExists(t *testing.T) {
@@ -220,6 +228,154 @@ func TestRunValidateAcceptsNoDedupFlag(t *testing.T) {
 	}
 }
 
+func TestRunCreateCnCNetSpriteFont(t *testing.T) {
+	root := t.TempDir()
+	inPath := filepath.Join(root, "in.fnt")
+	outDir := filepath.Join(root, "out")
+	outPath := filepath.Join(root, "font.xnb")
+	if err := writeSampleFont(inPath); err != nil {
+		t.Fatalf("write sample font: %v", err)
+	}
+
+	if err := runExport([]string{"-in", inPath, "-out", outDir}); err != nil {
+		t.Fatalf("runExport: %v", err)
+	}
+
+	stderr := captureStderr(t, func() error {
+		return runCreate([]string{"-in", outDir, "-out", outPath, "-format", fontout.FormatCnCNetSpriteFont})
+	})
+	if !strings.Contains(stderr, experimentalCnCNetSpriteFontWarning) {
+		t.Fatalf("stderr should contain experimental warning, got:\n%s", stderr)
+	}
+	if _, err := os.Stat(outPath); err != nil {
+		t.Fatalf("expected created xnb: %v", err)
+	}
+
+	raw, err := os.ReadFile(outPath)
+	if err != nil {
+		t.Fatalf("read created xnb: %v", err)
+	}
+	if got, want := string(raw[:3]), "XNB"; got != want {
+		t.Fatalf("xnb magic mismatch: got=%q want=%q", got, want)
+	}
+	if got, want := raw[3], byte('w'); got != want {
+		t.Fatalf("xnb platform mismatch: got=%q want=%q", got, want)
+	}
+	if got, want := raw[4], byte(5); got != want {
+		t.Fatalf("xnb version mismatch: got=%d want=%d", got, want)
+	}
+	if got, want := raw[5], byte(0x40); got != want {
+		t.Fatalf("xnb flags mismatch: got=%d want=%d", got, want)
+	}
+	if got, want := int(binary.LittleEndian.Uint32(raw[10:14])), len(decompressLZ4Block(t, raw[14:], int(binary.LittleEndian.Uint32(raw[10:14])))); got != want {
+		t.Fatalf("xnb decompressed size mismatch: got=%d want=%d", got, want)
+	}
+}
+
+func TestRunExportCnCNetSpriteFontRoundTripPreservesPNGs(t *testing.T) {
+	root := t.TempDir()
+	inPath := filepath.Join(root, "in.fnt")
+	firstOutDir := filepath.Join(root, "out_font")
+	xnbPath := filepath.Join(root, "font.xnb")
+	secondOutDir := filepath.Join(root, "xnb_out_font")
+	if err := writeRoundTripSampleFont(inPath); err != nil {
+		t.Fatalf("write roundtrip sample font: %v", err)
+	}
+
+	if err := runExport([]string{"-in", inPath, "-out", firstOutDir}); err != nil {
+		t.Fatalf("runExport .fnt: %v", err)
+	}
+	if err := runCreate([]string{"-in", firstOutDir, "-out", xnbPath, "-format", fontout.FormatCnCNetSpriteFont}); err != nil {
+		t.Fatalf("runCreate cncnet-spritefont: %v", err)
+	}
+	if err := runExport([]string{"-in", xnbPath, "-out", secondOutDir}); err != nil {
+		t.Fatalf("runExport .xnb: %v", err)
+	}
+
+	assertPNGTreeEqual(t, firstOutDir, secondOutDir)
+}
+
+func TestRunCreateCnCNetSpriteFontHelpMentionsExperimental(t *testing.T) {
+	stderr := captureStderr(t, func() error {
+		return runCreate([]string{"-h"})
+	})
+	if !strings.Contains(stderr, "cncnet-spritefont (experimental)") {
+		t.Fatalf("help should mention experimental format, got:\n%s", stderr)
+	}
+}
+
+func TestColorizeErrorWithoutANSI(t *testing.T) {
+	previous := stderrSupportsANSI
+	stderrSupportsANSI = func() bool { return false }
+	defer func() {
+		stderrSupportsANSI = previous
+	}()
+
+	if got, want := colorizeError("error:"), "error:"; got != want {
+		t.Fatalf("error label mismatch without ANSI: got=%q want=%q", got, want)
+	}
+}
+
+func TestColorizeErrorWithANSI(t *testing.T) {
+	previous := stderrSupportsANSI
+	stderrSupportsANSI = func() bool { return true }
+	defer func() {
+		stderrSupportsANSI = previous
+	}()
+
+	if got, want := colorizeError("error:"), "\033[31merror:\033[0m"; got != want {
+		t.Fatalf("error label mismatch with ANSI: got=%q want=%q", got, want)
+	}
+}
+
+func captureStderr(t *testing.T, fn func() error) string {
+	t.Helper()
+
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer readPipe.Close()
+
+	oldStderr := os.Stderr
+	os.Stderr = writePipe
+	defer func() {
+		os.Stderr = oldStderr
+	}()
+
+	if err := fn(); err != nil && err != flag.ErrHelp {
+		t.Fatalf("captured stderr command failed: %v", err)
+	}
+	if err := writePipe.Close(); err != nil {
+		t.Fatalf("close write pipe: %v", err)
+	}
+
+	output, err := io.ReadAll(readPipe)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	return string(output)
+}
+
+func TestRunCreateRejectsUnsupportedFormat(t *testing.T) {
+	root := t.TempDir()
+	inPath := filepath.Join(root, "in.fnt")
+	outDir := filepath.Join(root, "out")
+	outPath := filepath.Join(root, "font.bin")
+	if err := writeSampleFont(inPath); err != nil {
+		t.Fatalf("write sample font: %v", err)
+	}
+
+	if err := runExport([]string{"-in", inPath, "-out", outDir}); err != nil {
+		t.Fatalf("runExport: %v", err)
+	}
+
+	err := runCreate([]string{"-in", outDir, "-out", outPath, "-format", "unknown"})
+	if err == nil || !strings.Contains(err.Error(), "unsupported create format") {
+		t.Fatalf("expected unsupported format error, got: %v", err)
+	}
+}
+
 func writeSampleFont(path string) error {
 	font := &fnt.Font{
 		IdeographWidth: 8,
@@ -236,6 +392,79 @@ func writeSampleFont(path string) error {
 	return fnt.WriteFile(path, font)
 }
 
+func writeRoundTripSampleFont(path string) error {
+	font := &fnt.Font{
+		IdeographWidth: 8,
+		SymbolStride:   1,
+		SymbolHeight:   4,
+		FontHeight:     5,
+		SymbolsCount:   4,
+		SymbolDataSize: 5,
+		Symbols: []fnt.Symbol{
+			{Width: 3, Data: []byte{0x00, 0x00, 0x00, 0x00}},
+			{Width: 2, Data: []byte{0b1100_0000, 0b0100_0000, 0x00, 0x00}},
+			{Width: 4, Data: []byte{0x00, 0b0110_0000, 0b0010_0000, 0x00}},
+			{Width: 0, Data: []byte{0x00, 0x00, 0x00, 0x00}},
+		},
+	}
+	font.UnicodeTable[' '] = 1
+	font.UnicodeTable['?'] = 2
+	font.UnicodeTable['A'] = 3
+	font.UnicodeTable['B'] = 4
+	return fnt.WriteFile(path, font)
+}
+
+func assertPNGTreeEqual(t *testing.T, leftDir, rightDir string) {
+	t.Helper()
+
+	leftFiles := listPNGs(t, leftDir)
+	rightFiles := listPNGs(t, rightDir)
+	if len(leftFiles) != len(rightFiles) {
+		t.Fatalf("png file count mismatch: got=%d want=%d", len(rightFiles), len(leftFiles))
+	}
+	for i := range leftFiles {
+		if leftFiles[i] != rightFiles[i] {
+			t.Fatalf("png path mismatch at %d: got=%q want=%q", i, rightFiles[i], leftFiles[i])
+		}
+		leftRaw, err := os.ReadFile(filepath.Join(leftDir, leftFiles[i]))
+		if err != nil {
+			t.Fatalf("read %q: %v", leftFiles[i], err)
+		}
+		rightRaw, err := os.ReadFile(filepath.Join(rightDir, rightFiles[i]))
+		if err != nil {
+			t.Fatalf("read %q: %v", rightFiles[i], err)
+		}
+		if !bytes.Equal(leftRaw, rightRaw) {
+			t.Fatalf("png bytes mismatch for %q", leftFiles[i])
+		}
+	}
+}
+
+func listPNGs(t *testing.T, root string) []string {
+	t.Helper()
+
+	var files []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || filepath.Ext(path) != ".png" {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		files = append(files, rel)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk png tree %q: %v", root, err)
+	}
+	sort.Strings(files)
+	return files
+}
+
 func TestVersionString(t *testing.T) {
 	previous := version
 	version = "1.2.3"
@@ -246,4 +475,48 @@ func TestVersionString(t *testing.T) {
 	if got, want := versionString(), "ra2fnt version 1.2.3"; got != want {
 		t.Fatalf("version string mismatch: got=%q want=%q", got, want)
 	}
+}
+
+func TestProgressBarFinishIsIdempotent(t *testing.T) {
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer readPipe.Close()
+
+	oldStderr := os.Stderr
+	os.Stderr = writePipe
+	defer func() {
+		os.Stderr = oldStderr
+	}()
+
+	bar := newProgressBar("create")
+	bar.printed = true
+	bar.Finish()
+	bar.Finish()
+
+	if err := writePipe.Close(); err != nil {
+		t.Fatalf("close write pipe: %v", err)
+	}
+
+	output, err := io.ReadAll(readPipe)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	if got, want := string(output), "\n"; got != want {
+		t.Fatalf("unexpected finish output: got=%q want=%q", got, want)
+	}
+}
+
+func decompressLZ4Block(t *testing.T, src []byte, size int) []byte {
+	t.Helper()
+	dst := make([]byte, size)
+	n, err := lz4.UncompressBlock(src, dst)
+	if err != nil {
+		t.Fatalf("lz4.UncompressBlock: %v", err)
+	}
+	if got, want := n, size; got != want {
+		t.Fatalf("decompressed size mismatch: got=%d want=%d", got, want)
+	}
+	return dst
 }

@@ -1,0 +1,4 @@
+github.com/pierrec/lz4/v4 v4.1.26 h1:GrpZw1gZttORinvzBdXPUXATeqlJjqUG/D87TKMnhjY=
+github.com/pierrec/lz4/v4 v4.1.26/go.mod h1:EoQMVJgeeEOMsCqCzqFm2O0cJvljX2nGZjcRIPL34O4=
+github.com/secDre4mer/lzx v0.0.0-20250826110518-fedea00d45a5 h1:kmHE1qapEHsBpWXyeWR+UCdtZHvSPgYX7VmMeGqnVQI=
+github.com/secDre4mer/lzx v0.0.0-20250826110518-fedea00d45a5/go.mod h1:oJAzpWn0j/MLx5UEIq5h9eyWfkk0KEnJ2/Js1oviEzQ=
