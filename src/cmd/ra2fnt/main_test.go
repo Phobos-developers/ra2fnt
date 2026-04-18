@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"flag"
 	"image/png"
 	"io"
 	"os"
@@ -237,8 +238,15 @@ func TestRunCreateCnCNetSpriteFont(t *testing.T) {
 	if err := runExport([]string{"-in", inPath, "-out", outDir}); err != nil {
 		t.Fatalf("runExport: %v", err)
 	}
-	if err := runCreate([]string{"-in", outDir, "-out", outPath, "-format", fontout.FormatCnCNetSpriteFont}); err != nil {
-		t.Fatalf("runCreate cncnet-spritefont: %v", err)
+
+	stderr := captureStderr(t, func() error {
+		return runCreate([]string{"-in", outDir, "-out", outPath, "-format", fontout.FormatCnCNetSpriteFont})
+	})
+	if !strings.Contains(stderr, experimentalCnCNetSpriteFontWarning) {
+		t.Fatalf("stderr should contain experimental warning, got:\n%s", stderr)
+	}
+	if _, err := os.Stat(outPath); err != nil {
+		t.Fatalf("expected created xnb: %v", err)
 	}
 
 	raw, err := os.ReadFile(outPath)
@@ -260,6 +268,68 @@ func TestRunCreateCnCNetSpriteFont(t *testing.T) {
 	if got, want := int(binary.LittleEndian.Uint32(raw[10:14])), len(decompressLZ4Block(t, raw[14:], int(binary.LittleEndian.Uint32(raw[10:14])))); got != want {
 		t.Fatalf("xnb decompressed size mismatch: got=%d want=%d", got, want)
 	}
+}
+
+func TestRunCreateCnCNetSpriteFontHelpMentionsExperimental(t *testing.T) {
+	stderr := captureStderr(t, func() error {
+		return runCreate([]string{"-h"})
+	})
+	if !strings.Contains(stderr, "cncnet-spritefont (experimental)") {
+		t.Fatalf("help should mention experimental format, got:\n%s", stderr)
+	}
+}
+
+func TestColorizeErrorWithoutANSI(t *testing.T) {
+	previous := stderrSupportsANSI
+	stderrSupportsANSI = func() bool { return false }
+	defer func() {
+		stderrSupportsANSI = previous
+	}()
+
+	if got, want := colorizeError("error:"), "error:"; got != want {
+		t.Fatalf("error label mismatch without ANSI: got=%q want=%q", got, want)
+	}
+}
+
+func TestColorizeErrorWithANSI(t *testing.T) {
+	previous := stderrSupportsANSI
+	stderrSupportsANSI = func() bool { return true }
+	defer func() {
+		stderrSupportsANSI = previous
+	}()
+
+	if got, want := colorizeError("error:"), "\033[31merror:\033[0m"; got != want {
+		t.Fatalf("error label mismatch with ANSI: got=%q want=%q", got, want)
+	}
+}
+
+func captureStderr(t *testing.T, fn func() error) string {
+	t.Helper()
+
+	readPipe, writePipe, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer readPipe.Close()
+
+	oldStderr := os.Stderr
+	os.Stderr = writePipe
+	defer func() {
+		os.Stderr = oldStderr
+	}()
+
+	if err := fn(); err != nil && err != flag.ErrHelp {
+		t.Fatalf("captured stderr command failed: %v", err)
+	}
+	if err := writePipe.Close(); err != nil {
+		t.Fatalf("close write pipe: %v", err)
+	}
+
+	output, err := io.ReadAll(readPipe)
+	if err != nil {
+		t.Fatalf("read stderr: %v", err)
+	}
+	return string(output)
 }
 
 func TestRunCreateRejectsUnsupportedFormat(t *testing.T) {

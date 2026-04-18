@@ -14,6 +14,12 @@ import (
 )
 
 const progressBarWidth = 30
+const experimentalCnCNetSpriteFontWarning = "warning: cncnet-spritefont is experimental"
+const (
+	ansiYellow = "\033[33m"
+	ansiRed    = "\033[31m"
+	ansiReset  = "\033[0m"
+)
 
 var version = "dev"
 
@@ -93,6 +99,34 @@ func progressStageLabel(stage string) string {
 	}
 }
 
+var stderrSupportsANSI = detectStderrANSI
+
+func detectStderrANSI() bool {
+	info, err := os.Stderr.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+func colorizeWarning(text string) string {
+	if !stderrSupportsANSI() {
+		return text
+	}
+	return ansiYellow + text + ansiReset
+}
+
+func colorizeError(text string) string {
+	if !stderrSupportsANSI() {
+		return text
+	}
+	return ansiRed + text + ansiReset
+}
+
+func experimentalFormatLabel(format string) string {
+	return fmt.Sprintf("%s (%s)", format, colorizeWarning("experimental"))
+}
+
 func main() {
 	if len(os.Args) == 2 && (os.Args[1] == "-v" || os.Args[1] == "--version") {
 		printVersion()
@@ -124,7 +158,7 @@ func main() {
 	}
 
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+		fmt.Fprintln(os.Stderr, colorizeError("error:"), err)
 		os.Exit(1)
 	}
 }
@@ -229,7 +263,7 @@ func runCreate(args []string) error {
 	fs := flag.NewFlagSet("create", flag.ContinueOnError)
 	inDir := fs.String("in", "", "input directory created by export")
 	outPath := fs.String("out", "", "output font file")
-	format := fs.String("format", fontout.FormatFNT, "create output format: fnt, cncnet-spritefont")
+	format := fs.String("format", fontout.FormatFNT, "create output format: fnt, "+experimentalFormatLabel(fontout.FormatCnCNetSpriteFont))
 	noDedup := fs.Bool("no-dedup", false, "disable glyph deduplication")
 	fs.SetOutput(os.Stderr)
 
@@ -243,6 +277,9 @@ func runCreate(args []string) error {
 	outputFormat, err := fontout.NormalizeFormat(*format)
 	if err != nil {
 		return err
+	}
+	if outputFormat == fontout.FormatCnCNetSpriteFont {
+		fmt.Fprintf(os.Stderr, "%s\n", colorizeWarning(experimentalCnCNetSpriteFontWarning))
 	}
 
 	options := pngset.ImportOptions{}
@@ -310,6 +347,7 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "Usage:\n")
 	fmt.Fprintf(os.Stderr, "  %s export -in game.fnt -out out_dir [--scale N] [--force]\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s create -in out_dir -out output_file [--format fnt|cncnet-spritefont]\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "    %s\n", colorizeWarning("cncnet-spritefont is experimental"))
 	fmt.Fprintf(os.Stderr, "  %s validate -in out_dir\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s version\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s --version\n", os.Args[0])
