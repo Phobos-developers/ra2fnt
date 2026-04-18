@@ -87,7 +87,7 @@ func TestBuildGlyphsMatchesReferenceModel(t *testing.T) {
 	if got, want := letterA.cropRect, (rect{X: 0, Y: 1, Width: 2, Height: 4}); got != want {
 		t.Fatalf("A crop rect mismatch: got=%+v want=%+v", got, want)
 	}
-	if got, want := letterA.kerning, (vec3{X: 1, Y: 2, Z: 1}); got != want {
+	if got, want := letterA.kerning, (vec3{X: 1, Y: 2, Z: 2}); got != want {
 		t.Fatalf("A kerning mismatch: got=%+v want=%+v", got, want)
 	}
 
@@ -245,7 +245,7 @@ func TestMarshalBinaryWritesReferenceLikeSpriteFontXNB(t *testing.T) {
 	if got, want := kernings[0], (vec3{X: 0, Y: 1, Z: 2}); got != want {
 		t.Fatalf("space kerning mismatch: got=%+v want=%+v", got, want)
 	}
-	if got, want := kernings[2], (vec3{X: 1, Y: 2, Z: 1}); got != want {
+	if got, want := kernings[2], (vec3{X: 1, Y: 2, Z: 2}); got != want {
 		t.Fatalf("A kerning mismatch: got=%+v want=%+v", got, want)
 	}
 	if got, want := kernings[3], (vec3{}); got != want {
@@ -284,7 +284,7 @@ func TestMarshalBinaryOmitsDefaultCharWhenQuestionIsMissing(t *testing.T) {
 		t.Fatalf("MarshalBinary: %v", err)
 	}
 
-	decompressedPayload := decompressXNBPayload(t, raw)
+	decompressedPayload := decompressLZ4XNBPayload(t, raw)
 	parser := newTestParser(t, decompressedPayload)
 	typeReaderCount := parser.read7BitEncodedInt()
 	for i := 0; i < typeReaderCount; i++ {
@@ -315,6 +315,45 @@ func TestMarshalBinaryOmitsDefaultCharWhenQuestionIsMissing(t *testing.T) {
 	hasDefaultChar, _ := parser.readOptionalChar()
 	if hasDefaultChar {
 		t.Fatalf("expected default character to be absent")
+	}
+}
+
+func TestParseRoundTripSupportsAllXNBEncodings(t *testing.T) {
+	font := sampleReferenceLikeFont()
+	payload := marshalSpriteFontPayloadForTest(t, font)
+
+	testCases := []struct {
+		name string
+		raw  []byte
+	}{
+		{
+			name: "uncompressed",
+			raw:  marshalUncompressedXNBForTest(payload),
+		},
+		{
+			name: "lz4",
+			raw: func() []byte {
+				raw, err := MarshalBinary(font)
+				if err != nil {
+					t.Fatalf("MarshalBinary: %v", err)
+				}
+				return raw
+			}(),
+		},
+		{
+			name: "lzx",
+			raw:  marshalLZXXNBForTest(payload),
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			parsed, err := Parse(tc.raw)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			assertFontsEqual(t, parsed, font)
+		})
 	}
 }
 
@@ -420,7 +459,129 @@ func sampleReferenceLikeFont() *fnt.Font {
 	return font
 }
 
-func decompressXNBPayload(t *testing.T, raw []byte) []byte {
+func marshalSpriteFontPayloadForTest(t *testing.T, font *fnt.Font) []byte {
+	t.Helper()
+
+	glyphs, defaultChar, hasDefaultChar, err := buildGlyphs(font)
+	if err != nil {
+		t.Fatalf("buildGlyphs: %v", err)
+	}
+	layout, err := layoutGlyphs(glyphs, int(font.SymbolHeight))
+	if err != nil {
+		t.Fatalf("layoutGlyphs: %v", err)
+	}
+	payload, err := marshalContent(
+		layout.glyphs,
+		renderAtlas(layout),
+		spriteFontLineSpacing(font),
+		defaultChar,
+		hasDefaultChar,
+	)
+	if err != nil {
+		t.Fatalf("marshalContent: %v", err)
+	}
+	return payload
+}
+
+func marshalUncompressedXNBForTest(payload []byte) []byte {
+	raw := make([]byte, 0, xnbHeaderSize+len(payload))
+	raw = append(raw, xnbMagic...)
+	raw = append(raw, byte(xnbPlatformWindows))
+	raw = append(raw, byte(xnbVersion5))
+	raw = append(raw, 0)
+
+	var header [4]byte
+	binary.LittleEndian.PutUint32(header[:], uint32(xnbHeaderSize+len(payload)))
+	raw = append(raw, header[:]...)
+	raw = append(raw, payload...)
+	return raw
+}
+
+func marshalLZXXNBForTest(payload []byte) []byte {
+	compressedPayload := encodeLZXUncompressedStreamForTest(payload)
+	framedPayload := frameLZXPayloadForXNBForTest(compressedPayload)
+
+	raw := make([]byte, 0, xnbCompressedHeaderSize+len(framedPayload))
+	raw = append(raw, xnbMagic...)
+	raw = append(raw, byte(xnbPlatformWindows))
+	raw = append(raw, byte(xnbVersion5))
+	raw = append(raw, byte(xnbFlagsCompressedLZX))
+
+	var header [4]byte
+	binary.LittleEndian.PutUint32(header[:], uint32(xnbCompressedHeaderSize+len(framedPayload)))
+	raw = append(raw, header[:]...)
+	binary.LittleEndian.PutUint32(header[:], uint32(len(payload)))
+	raw = append(raw, header[:]...)
+	raw = append(raw, framedPayload...)
+	return raw
+}
+
+func encodeLZXUncompressedStreamForTest(payload []byte) []byte {
+	writer := &lzxTestBitWriter{}
+	writer.writeBits(0, 1) // no Intel E8 file size
+	writer.writeBits(3, 3) // uncompressed block
+	writer.writeBits(uint32(len(payload)), 24)
+	writer.align16()
+
+	raw := writer.bytes()
+	raw = append(raw, make([]byte, 12)...)
+	raw = append(raw, payload...)
+	return raw
+}
+
+func frameLZXPayloadForXNBForTest(raw []byte) []byte {
+	framed := make([]byte, 0, len(raw)+4)
+	for len(raw) > 0 {
+		chunkSize := len(raw)
+		if chunkSize > 0xFFFF {
+			chunkSize = 0xFFFF
+		}
+		framed = append(framed, byte(chunkSize>>8), byte(chunkSize))
+		framed = append(framed, raw[:chunkSize]...)
+		raw = raw[chunkSize:]
+	}
+	framed = append(framed, 0x00, 0x00)
+	return framed
+}
+
+func assertFontsEqual(t *testing.T, got, want *fnt.Font) {
+	t.Helper()
+
+	if got == nil || want == nil {
+		t.Fatalf("font nil mismatch: got=%v want=%v", got, want)
+	}
+	if got.SymbolStride != want.SymbolStride {
+		t.Fatalf("symbol stride mismatch: got=%d want=%d", got.SymbolStride, want.SymbolStride)
+	}
+	if got.SymbolHeight != want.SymbolHeight {
+		t.Fatalf("symbol height mismatch: got=%d want=%d", got.SymbolHeight, want.SymbolHeight)
+	}
+	if got.SymbolsCount != want.SymbolsCount {
+		t.Fatalf("symbols count mismatch: got=%d want=%d", got.SymbolsCount, want.SymbolsCount)
+	}
+	if got.SymbolDataSize != want.SymbolDataSize {
+		t.Fatalf("symbol data size mismatch: got=%d want=%d", got.SymbolDataSize, want.SymbolDataSize)
+	}
+	if got.UnicodeTable != want.UnicodeTable {
+		t.Fatalf("unicode table mismatch")
+	}
+	if len(got.Symbols) != len(want.Symbols) {
+		t.Fatalf("symbols slice length mismatch: got=%d want=%d", len(got.Symbols), len(want.Symbols))
+	}
+	for i := range want.Symbols {
+		if got.Symbols[i].Width != want.Symbols[i].Width {
+			t.Fatalf("symbol %d width mismatch: got=%d want=%d", i, got.Symbols[i].Width, want.Symbols[i].Width)
+		}
+		if !bytes.Equal(got.Symbols[i].Data, want.Symbols[i].Data) {
+			t.Fatalf("symbol %d data mismatch:\n got=%08b\nwant=%08b", i, got.Symbols[i].Data, want.Symbols[i].Data)
+		}
+	}
+	if !bytes.Equal(got.Tail, want.Tail) {
+		t.Fatalf("tail mismatch")
+	}
+}
+
+func decompressLZ4XNBPayload(t *testing.T, raw []byte) []byte {
 	t.Helper()
 	if len(raw) < xnbCompressedHeaderSize {
 		t.Fatalf("compressed XNB too short: %d", len(raw))
@@ -575,4 +736,42 @@ func (p *testParser) readVec3s() []vec3 {
 
 func isPowerOfTwo(value int) bool {
 	return value > 0 && value&(value-1) == 0
+}
+
+type lzxTestBitWriter struct {
+	words []uint16
+	word  uint16
+	bits  int
+}
+
+func (w *lzxTestBitWriter) writeBits(value uint32, count int) {
+	for shift := count - 1; shift >= 0; shift-- {
+		w.word = (w.word << 1) | uint16((value>>shift)&1)
+		w.bits++
+		if w.bits == 16 {
+			w.words = append(w.words, w.word)
+			w.word = 0
+			w.bits = 0
+		}
+	}
+}
+
+func (w *lzxTestBitWriter) align16() {
+	if w.bits == 0 {
+		return
+	}
+	w.word <<= 16 - w.bits
+	w.words = append(w.words, w.word)
+	w.word = 0
+	w.bits = 0
+}
+
+func (w *lzxTestBitWriter) bytes() []byte {
+	w.align16()
+
+	raw := make([]byte, 0, len(w.words)*2)
+	for _, word := range w.words {
+		raw = append(raw, byte(word), byte(word>>8))
+	}
+	return raw
 }

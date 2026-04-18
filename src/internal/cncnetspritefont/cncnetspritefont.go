@@ -306,7 +306,7 @@ func symbolToGlyph(codepoint uint16, data []byte, stride, height, width int) (gl
 		return newInvisibleGlyphPlaceholder(codepoint, width, height), nil
 	}
 
-	return newVisibleGlyph(codepoint, data, stride, height, bounds), nil
+	return newVisibleGlyph(codepoint, data, stride, height, width, bounds), nil
 }
 
 // MonoGame reference SpriteFonts use a 1x1 placeholder texture region for glyphs that
@@ -329,9 +329,10 @@ func newInvisibleGlyphPlaceholder(codepoint uint16, width, height int) glyph {
 	}
 }
 
-func newVisibleGlyph(codepoint uint16, data []byte, stride, height int, bounds image.Rectangle) glyph {
+func newVisibleGlyph(codepoint uint16, data []byte, stride, height, width int, bounds image.Rectangle) glyph {
 	img := rasterizeGlyph(data, stride, bounds)
 	visibleWidth := bounds.Dx()
+	trailingBlankColumns := width - bounds.Min.X - visibleWidth
 
 	return glyph{
 		codepoint: codepoint,
@@ -345,7 +346,7 @@ func newVisibleGlyph(codepoint uint16, data []byte, stride, height int, bounds i
 		kerning: vec3{
 			X: float32(bounds.Min.X),
 			Y: float32(visibleWidth),
-			Z: spriteFontGlyphGap,
+			Z: float32(trailingBlankColumns) + spriteFontGlyphGap,
 		},
 	}
 }

@@ -29,10 +29,14 @@ scripts\build-release.bat v1.0.0
 
 ## Usage
 
-Export `.fnt` to PNG set:
+Export `.fnt` or `.xnb` to PNG set:
 
 ```bash
 ./ra2fnt export -in game.fnt -out out_font
+```
+
+```bash
+./ra2fnt export -in SpriteFont.xnb -out out_font
 ```
 
 Export with integer pixel scaling (for easier editing):
@@ -84,7 +88,7 @@ If `out` directory already exists, `export` asks for confirmation before deletin
 
 ## Export format
 
-`export` writes only PNG files grouped by Unicode ranges:
+`export` reads `.fnt` and `cncnet-spritefont` `.xnb` files, and writes only PNG files grouped by Unicode ranges:
 
 ```text
 out_font/
@@ -153,6 +157,7 @@ Because unicode mapping order/tail bytes are rebuilt, the resulting `.fnt` is no
 - `cncnet-spritefont` always writes LZ4-compressed `SpriteFont XNB v5`.
 - `cncnet-spritefont` is an experimental feature.
 - When `?` is present, `cncnet-spritefont` writes it as `defaultChar` fallback.
+- `export` preserves PNG glyph images exactly when round-tripping `out_font -> .xnb -> out_font`.
 
 ## License
 

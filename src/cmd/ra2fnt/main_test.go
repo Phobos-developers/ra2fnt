@@ -6,8 +6,10 @@ import (
 	"flag"
 	"image/png"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -270,6 +272,29 @@ func TestRunCreateCnCNetSpriteFont(t *testing.T) {
 	}
 }
 
+func TestRunExportCnCNetSpriteFontRoundTripPreservesPNGs(t *testing.T) {
+	root := t.TempDir()
+	inPath := filepath.Join(root, "in.fnt")
+	firstOutDir := filepath.Join(root, "out_font")
+	xnbPath := filepath.Join(root, "font.xnb")
+	secondOutDir := filepath.Join(root, "xnb_out_font")
+	if err := writeRoundTripSampleFont(inPath); err != nil {
+		t.Fatalf("write roundtrip sample font: %v", err)
+	}
+
+	if err := runExport([]string{"-in", inPath, "-out", firstOutDir}); err != nil {
+		t.Fatalf("runExport .fnt: %v", err)
+	}
+	if err := runCreate([]string{"-in", firstOutDir, "-out", xnbPath, "-format", fontout.FormatCnCNetSpriteFont}); err != nil {
+		t.Fatalf("runCreate cncnet-spritefont: %v", err)
+	}
+	if err := runExport([]string{"-in", xnbPath, "-out", secondOutDir}); err != nil {
+		t.Fatalf("runExport .xnb: %v", err)
+	}
+
+	assertPNGTreeEqual(t, firstOutDir, secondOutDir)
+}
+
 func TestRunCreateCnCNetSpriteFontHelpMentionsExperimental(t *testing.T) {
 	stderr := captureStderr(t, func() error {
 		return runCreate([]string{"-h"})
@@ -365,6 +390,79 @@ func writeSampleFont(path string) error {
 	}
 	font.UnicodeTable['A'] = 1
 	return fnt.WriteFile(path, font)
+}
+
+func writeRoundTripSampleFont(path string) error {
+	font := &fnt.Font{
+		IdeographWidth: 8,
+		SymbolStride:   1,
+		SymbolHeight:   4,
+		FontHeight:     5,
+		SymbolsCount:   4,
+		SymbolDataSize: 5,
+		Symbols: []fnt.Symbol{
+			{Width: 3, Data: []byte{0x00, 0x00, 0x00, 0x00}},
+			{Width: 2, Data: []byte{0b1100_0000, 0b0100_0000, 0x00, 0x00}},
+			{Width: 4, Data: []byte{0x00, 0b0110_0000, 0b0010_0000, 0x00}},
+			{Width: 0, Data: []byte{0x00, 0x00, 0x00, 0x00}},
+		},
+	}
+	font.UnicodeTable[' '] = 1
+	font.UnicodeTable['?'] = 2
+	font.UnicodeTable['A'] = 3
+	font.UnicodeTable['B'] = 4
+	return fnt.WriteFile(path, font)
+}
+
+func assertPNGTreeEqual(t *testing.T, leftDir, rightDir string) {
+	t.Helper()
+
+	leftFiles := listPNGs(t, leftDir)
+	rightFiles := listPNGs(t, rightDir)
+	if len(leftFiles) != len(rightFiles) {
+		t.Fatalf("png file count mismatch: got=%d want=%d", len(rightFiles), len(leftFiles))
+	}
+	for i := range leftFiles {
+		if leftFiles[i] != rightFiles[i] {
+			t.Fatalf("png path mismatch at %d: got=%q want=%q", i, rightFiles[i], leftFiles[i])
+		}
+		leftRaw, err := os.ReadFile(filepath.Join(leftDir, leftFiles[i]))
+		if err != nil {
+			t.Fatalf("read %q: %v", leftFiles[i], err)
+		}
+		rightRaw, err := os.ReadFile(filepath.Join(rightDir, rightFiles[i]))
+		if err != nil {
+			t.Fatalf("read %q: %v", rightFiles[i], err)
+		}
+		if !bytes.Equal(leftRaw, rightRaw) {
+			t.Fatalf("png bytes mismatch for %q", leftFiles[i])
+		}
+	}
+}
+
+func listPNGs(t *testing.T, root string) []string {
+	t.Helper()
+
+	var files []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || filepath.Ext(path) != ".png" {
+			return nil
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		files = append(files, rel)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk png tree %q: %v", root, err)
+	}
+	sort.Strings(files)
+	return files
 }
 
 func TestVersionString(t *testing.T) {

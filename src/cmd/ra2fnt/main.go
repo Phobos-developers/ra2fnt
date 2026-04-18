@@ -2,12 +2,14 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
 	"os"
 	"strings"
 
+	"ra2fnt/src/internal/cncnetspritefont"
 	"ra2fnt/src/internal/fnt"
 	"ra2fnt/src/internal/fontout"
 	"ra2fnt/src/internal/pngset"
@@ -165,7 +167,7 @@ func main() {
 
 func runExport(args []string) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
-	inPath := fs.String("in", "", "input .fnt file")
+	inPath := fs.String("in", "", "input .fnt or cncnet-spritefont .xnb file")
 	outDir := fs.String("out", "", "output directory for png set")
 	scale := fs.Int("scale", 1, "integer export scale (>=1)")
 	force := fs.Bool("force", false, "delete existing output directory without confirmation")
@@ -191,7 +193,7 @@ func runExport(args []string) error {
 		return nil
 	}
 
-	font, err := fnt.ReadFile(*inPath)
+	font, err := readFontForExport(*inPath)
 	if err != nil {
 		return err
 	}
@@ -221,6 +223,30 @@ func runExport(args []string) error {
 		font.SymbolsCount,
 	)
 	return nil
+}
+
+func readFontForExport(path string) (*fnt.Font, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read %q: %w", path, err)
+	}
+
+	switch {
+	case len(data) >= 4 && bytes.Equal(data[:4], []byte("fonT")):
+		font, err := fnt.Parse(data)
+		if err != nil {
+			return nil, fmt.Errorf("parse %q as .fnt: %w", path, err)
+		}
+		return font, nil
+	case len(data) >= 3 && bytes.Equal(data[:3], []byte("XNB")):
+		font, err := cncnetspritefont.Parse(data)
+		if err != nil {
+			return nil, fmt.Errorf("parse %q as cncnet-spritefont: %w", path, err)
+		}
+		return font, nil
+	default:
+		return nil, fmt.Errorf("unsupported input format for %q", path)
+	}
 }
 
 func ensureExportOutDir(outDir string, input io.Reader, output io.Writer, force bool) (bool, error) {
@@ -345,7 +371,7 @@ func runValidate(args []string) error {
 
 func usage() {
 	fmt.Fprintf(os.Stderr, "Usage:\n")
-	fmt.Fprintf(os.Stderr, "  %s export -in game.fnt -out out_dir [--scale N] [--force]\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  %s export -in input_font -out out_dir [--scale N] [--force]\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  %s create -in out_dir -out output_file [--format fnt|cncnet-spritefont]\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "    %s\n", colorizeWarning("cncnet-spritefont is experimental"))
 	fmt.Fprintf(os.Stderr, "  %s validate -in out_dir\n", os.Args[0])
